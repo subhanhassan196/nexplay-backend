@@ -1,0 +1,1796 @@
+// NexPlay — Phase 3 Database Schema
+// Auth & User Management only. No wallet/rewards/tournaments/games models here
+// by design — those belong to later phases and will reference User by id.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────
+
+enum Role {
+  PLAYER
+  /// Level 4 — support inbox only, no destructive access.
+  SUPPORT_AGENT
+  /// Level 3 — operational management (content, games, moderation).
+  MODERATOR
+  /// Level 2 — broad management, cannot touch super-admin config.
+  ADMIN
+  /// Level 1 — full platform access.
+  SUPER_ADMIN
+}
+
+enum AuthProvider {
+  CREDENTIALS
+  GOOGLE
+  DISCORD
+}
+
+// ─────────────────────────────────────────────
+// Core User
+// ─────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  username      String   @unique
+  passwordHash  String? // null for OAuth-only accounts
+  role          Role     @default(PLAYER)
+
+  isEmailVerified Boolean @default(false)
+  accountStatus   AccountStatus @default(ACTIVE)
+
+  // Account lock / brute-force protection
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // soft delete — see Phase 5 docs in README for rationale
+
+  profile           Profile?
+  settings          UserSettings?
+  sessions          Session[]
+  refreshTokens     RefreshToken[]
+  emailVerifications EmailVerificationToken[]
+  passwordResets    PasswordResetToken[]
+  oauthAccounts     OAuthAccount[]
+
+  // ── Phase 5 back-relations (social, games, community, support) ──
+  notifications          Notification[]
+  notificationPreferences NotificationPreference[]
+
+  sentFriendRequests     FriendRequest[]      @relation("SentFriendRequests")
+  receivedFriendRequests FriendRequest[]      @relation("ReceivedFriendRequests")
+  friendsInitiated       Friend[]             @relation("FriendInitiator")
+  friendsReceived        Friend[]             @relation("FriendRecipient")
+  following              Follow[]             @relation("FollowingRelation")
+  followers              Follow[]             @relation("FollowerRelation")
+  blocksInitiated        Block[]              @relation("BlockInitiator")
+  blocksReceived         Block[]              @relation("BlockTarget")
+
+  gameReviews            GameReview[]
+  gameRatings            GameRating[]
+  favoriteGames          FavoriteGame[]
+  recentlyPlayed         RecentlyPlayed[]
+
+  leaderboardEntries     LeaderboardEntry[]
+  userAchievements       UserAchievement[]
+  xpHistory              XPHistory[]
+  userBadges             UserBadge[]
+
+  tournamentParticipations TournamentParticipant[]
+  tournamentResults        TournamentResult[]
+
+  communityPosts         CommunityPost[]
+  communityComments      CommunityComment[]
+  communityLikes         CommunityLike[]
+  communityBookmarks     CommunityBookmark[]
+  reportsFiled           CommunityReport[]    @relation("ReportsFiled")
+  reportsResolved        CommunityReport[]    @relation("ReportsResolved")
+
+  permissions            UserPermission[]
+  coinWallet             CoinWallet?
+  wheelSpins             WheelSpin[]
+  dailyRewardClaims      DailyRewardClaim[]
+  storeRedemptions       StoreRedemption[]
+  supportTickets         SupportTicket[]
+  supportTicketsAssigned SupportTicket[]      @relation("AssignedSupportTickets")
+  supportReplies         SupportReply[]
+  auditLogs              AuditLog[]
+
+  // ── Phase 6 back-relations (playable games engine) ──
+  gameSessions           GameSession[]
+  gameStats              UserGameStats[]
+
+  // ── Global Support Messenger ──
+  conversation           Conversation?       @relation("ConversationOwner")
+  sentMessages           Message[]           @relation("MessageSender")
+  assignedConversations  Conversation[]      @relation("AssignedAgent")
+  messageReadReceipts    MessageReadStatus[]
+
+  @@index([email])
+  @@index([username])
+  @@index([accountStatus])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// Profile (Phase 3 profile fields only)
+// ─────────────────────────────────────────────
+
+model Profile {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  displayName      String?
+  bio              String?  @db.VarChar(280)
+  avatarUrl        String?
+  bannerUrl        String?
+  country          String?
+  language         String   @default("en")
+  timezone         String   @default("UTC")
+
+  favoriteGenres   String[] @default([])
+  favoriteGames    String[] @default([])
+
+  updatedAt        DateTime @updatedAt
+
+  @@map("profiles")
+}
+
+// ─────────────────────────────────────────────
+// Settings (privacy + notifications)
+// ─────────────────────────────────────────────
+
+model UserSettings {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Privacy
+  profileVisibility   ProfileVisibility @default(PUBLIC)
+  showOnlineStatus    Boolean           @default(true)
+  showGameActivity    Boolean           @default(true)
+
+  // Notifications
+  emailNotifications  Boolean @default(true)
+  pushNotifications   Boolean @default(true)
+  marketingEmails     Boolean @default(false)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("user_settings")
+}
+
+enum ProfileVisibility {
+  PUBLIC
+  FRIENDS_ONLY
+  PRIVATE
+}
+
+// ─────────────────────────────────────────────
+// OAuth linked accounts (Google / Discord / future)
+// ─────────────────────────────────────────────
+
+model OAuthAccount {
+  id             String       @id @default(cuid())
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  provider       AuthProvider
+  providerUserId String
+  accessToken    String?      @db.Text
+  refreshToken   String?      @db.Text
+  expiresAt      DateTime?
+
+  createdAt      DateTime     @default(now())
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@map("oauth_accounts")
+}
+
+// ─────────────────────────────────────────────
+// Sessions (device/session tracking, independent of JWT)
+// ─────────────────────────────────────────────
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  userAgent    String?
+  ipAddress    String?
+  isRevoked    Boolean  @default(false)
+
+  createdAt    DateTime @default(now())
+  lastActiveAt DateTime @updatedAt
+  expiresAt    DateTime
+
+  refreshTokens RefreshToken[]
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// ─────────────────────────────────────────────
+// Refresh Tokens (rotated on every use — see token.service.ts)
+// ─────────────────────────────────────────────
+
+model RefreshToken {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  sessionId   String
+  session     Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  tokenHash   String   @unique // never store raw token
+  isRevoked   Boolean  @default(false)
+  replacedBy  String? // tokenHash of the rotated successor, for reuse-detection
+
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([userId])
+  @@index([sessionId])
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────────────────────────
+// Email Verification Tokens
+// ─────────────────────────────────────────────
+
+model EmailVerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("email_verification_tokens")
+}
+
+// ─────────────────────────────────────────────
+// Password Reset Tokens
+// ─────────────────────────────────────────────
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ═════════════════════════════════════════════════════════════
+// PHASE 5 — Database Expansion
+// ═════════════════════════════════════════════════════════════
+//
+// Everything below is ADDITIVE to the Phase 3 schema above (User,
+// Profile, UserSettings, Session, RefreshToken, EmailVerificationToken,
+// PasswordResetToken, OAuthAccount are untouched in shape/behavior).
+//
+// ID STRATEGY NOTE: Phase 3 models use `cuid()` for primary keys and
+// are left as-is (changing an already-migrated PK strategy would be a
+// breaking change to existing data/foreign keys). Every new Phase 5
+// model uses `uuid()` per this phase's brief. Both are globally unique,
+// non-sequential, and index equally well — mixing them across
+// "eras" of the schema is a normal, safe pattern.
+//
+// WHAT WAS DELIBERATELY SIMPLIFIED (documented per phase instructions
+// to explain every model/relationship):
+//
+// - Role/Permission tables: NOT added as relational tables. Phase 3/4
+//   already wire role-based access control through the `Role` enum
+//   (embedded directly in the JWT access-token payload — see
+//   src/utils/jwt.ts — and checked by src/middlewares/auth.middleware.ts's
+//   `requireRole()`). Replacing that with dynamic DB-driven permissions
+//   would invalidate every already-issued token's trust model and is an
+//   admin-panel-era concern (Phase 12). The enum-based system is kept;
+//   a `Permission`/`RolePermission` layer can be added later purely
+//   additively, the same way this phase was added.
+// - Game.developer / Game.publisher are single relations (a game has
+//   one developer and one publisher), not many-to-many. This matches
+//   how the vast majority of game catalogs actually work and keeps
+//   catalog queries simple; can be upgraded to many-to-many later
+//   without touching unrelated tables if a co-published title needs it.
+// - CommunityLike stores an optional `postId` OR `commentId` on one
+//   row (never both) rather than two separate tables. Postgres unique
+//   indexes treat NULL as distinct-from-NULL, so the compound
+//   `@@unique([userId, postId, commentId])` below does NOT by itself
+//   stop a user from liking the same post twice at the DB level — the
+//   service layer (Phase 7) must enforce "exactly one of postId/commentId"
+//   and the like-uniqueness check in application code (or a Postgres
+//   partial unique index added via a raw SQL migration, which Prisma
+//   supports via `prisma migrate dev --create-only` + manual SQL).
+// - GameRating vs GameReview are separate tables on purpose: a quick
+//   1-5 star rating (GameRating, low-friction, most users) is a
+//   different write pattern/frequency than a written review
+//   (GameReview, heavier, moderatable). Aggregates for a game's
+//   average rating should be computed from GameRating.
+
+// ─────────────────────────────────────────────
+// Phase 5 Enums
+// ─────────────────────────────────────────────
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+  DEACTIVATED
+  PENDING_DELETION
+}
+
+enum NotificationType {
+  FRIEND_REQUEST
+  FRIEND_ACCEPTED
+  NEW_FOLLOWER
+  ACHIEVEMENT_UNLOCKED
+  BADGE_EARNED
+  TOURNAMENT_INVITE
+  TOURNAMENT_STARTING
+  TOURNAMENT_RESULT
+  LEADERBOARD_RANK_CHANGE
+  COMMUNITY_COMMENT
+  COMMUNITY_LIKE
+  COMMUNITY_MENTION
+  SUPPORT_REPLY
+  ANNOUNCEMENT
+  SYSTEM
+}
+
+enum GameStatus {
+  DRAFT
+  PUBLISHED
+  MAINTENANCE
+  DEPRECATED
+  ARCHIVED
+}
+
+enum GameMediaType {
+  SCREENSHOT
+  TRAILER
+  BANNER
+  ICON
+}
+
+enum TournamentStatus {
+  DRAFT
+  UPCOMING
+  REGISTRATION_OPEN
+  LIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum TournamentFormat {
+  SINGLE_ELIMINATION
+  DOUBLE_ELIMINATION
+  ROUND_ROBIN
+  SWISS
+}
+
+enum TournamentParticipantStatus {
+  REGISTERED
+  CHECKED_IN
+  DISQUALIFIED
+  WITHDRAWN
+}
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
+}
+
+enum SupportStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_ON_USER
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum AchievementType {
+  MILESTONE
+  SKILL
+  SOCIAL
+  COLLECTION
+  SEASONAL
+  HIDDEN
+}
+
+enum ReportReason {
+  SPAM
+  HARASSMENT
+  HATE_SPEECH
+  NSFW
+  MISINFORMATION
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWED
+  ACTION_TAKEN
+  DISMISSED
+}
+
+// ─────────────────────────────────────────────
+// Avatars (selectable catalog — distinct from Profile.avatarUrl,
+// which stores a user's own uploaded image via Cloudinary in Phase 4).
+// This catalog powers a free "pick a default avatar" flow.
+// ─────────────────────────────────────────────
+
+model Avatar {
+  id        String   @id @default(uuid())
+  name      String
+  imageUrl  String
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@map("avatars")
+}
+
+// ─────────────────────────────────────────────
+// Notifications
+// ─────────────────────────────────────────────
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type      NotificationType
+  title     String
+  body      String?
+  data      Json? // arbitrary payload (e.g. { tournamentId, postId })
+  isRead    Boolean          @default(false)
+  readAt    DateTime?
+
+  createdAt DateTime         @default(now())
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  id      String           @id @default(uuid())
+  userId  String
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    NotificationType
+  email   Boolean          @default(true)
+  push    Boolean          @default(true)
+  inApp   Boolean          @default(true)
+
+  @@unique([userId, type])
+  @@map("notification_preferences")
+}
+
+// ─────────────────────────────────────────────
+// Social graph: friends, follows, blocks
+// ─────────────────────────────────────────────
+
+model FriendRequest {
+  id          String               @id @default(uuid())
+  senderId    String
+  sender      User                 @relation("SentFriendRequests", fields: [senderId], references: [id], onDelete: Cascade)
+  receiverId  String
+  receiver    User                 @relation("ReceivedFriendRequests", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  status      FriendRequestStatus  @default(PENDING)
+  createdAt   DateTime             @default(now())
+  respondedAt DateTime?
+
+  @@unique([senderId, receiverId])
+  @@index([receiverId, status])
+  @@map("friend_requests")
+}
+
+/// A materialized, accepted friendship. Stored as a single directional
+/// row (initiator -> recipient); the repository layer is expected to
+/// query both `friendsInitiated` and `friendsReceived` and merge them
+/// into one "friends list" — kept this way (rather than two rows per
+/// friendship) to avoid double-writes/double-deletes drifting out of sync.
+model Friend {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation("FriendInitiator", fields: [userId], references: [id], onDelete: Cascade)
+  friendId    String
+  friend      User     @relation("FriendRecipient", fields: [friendId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+
+  @@unique([userId, friendId])
+  @@index([friendId])
+  @@map("friends")
+}
+
+model Follow {
+  id          String   @id @default(uuid())
+  followerId  String
+  follower    User     @relation("FollowerRelation", fields: [followerId], references: [id], onDelete: Cascade)
+  followingId String
+  following   User     @relation("FollowingRelation", fields: [followingId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])
+  @@index([followingId])
+  @@map("follows")
+}
+
+model Block {
+  id            String   @id @default(uuid())
+  blockerId     String
+  blocker       User     @relation("BlockInitiator", fields: [blockerId], references: [id], onDelete: Cascade)
+  blockedId     String
+  blocked       User     @relation("BlockTarget", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  createdAt     DateTime @default(now())
+
+  @@unique([blockerId, blockedId])
+  @@index([blockedId])
+  @@map("blocks")
+}
+
+// ─────────────────────────────────────────────
+// Games catalog
+// ─────────────────────────────────────────────
+
+model GameCategory {
+  id          String  @id @default(uuid())
+  slug        String  @unique
+  name        String
+  description String?
+  iconName    String? // maps to a lucide-react icon name on the frontend
+  order       Int     @default(0)
+  isActive    Boolean @default(true)
+
+  games       Game[]
+
+  @@index([slug])
+  @@map("game_categories")
+}
+
+model GameTag {
+  id    String @id @default(uuid())
+  slug  String @unique
+  name  String
+
+  games Game[] @relation("GameToGameTag")
+
+  @@index([slug])
+  @@map("game_tags")
+}
+
+model GameDeveloper {
+  id         String  @id @default(uuid())
+  slug       String  @unique
+  name       String
+  websiteUrl String?
+  logoUrl    String?
+
+  games      Game[]
+
+  @@map("game_developers")
+}
+
+model GamePublisher {
+  id         String  @id @default(uuid())
+  slug       String  @unique
+  name       String
+  websiteUrl String?
+  logoUrl    String?
+
+  games      Game[]
+
+  @@map("game_publishers")
+}
+
+model Game {
+  id              String        @id @default(uuid())
+  slug            String        @unique
+  title           String
+  description     String
+  longDescription String?
+  status          GameStatus    @default(DRAFT)
+
+  categoryId      String?
+  category        GameCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  developerId     String?
+  developer       GameDeveloper? @relation(fields: [developerId], references: [id], onDelete: SetNull)
+  publisherId     String?
+  publisher       GamePublisher? @relation(fields: [publisherId], references: [id], onDelete: SetNull)
+
+  coverImageUrl   String?
+  logoUrl         String?   // square icon used in cards, chat context, lists
+  bannerUrl       String?   // wide art for detail-page hero
+  displayOrder    Int       @default(0)
+  releaseDate     DateTime?
+
+  // Cached/denormalized aggregates — recomputed by a Phase 6 background
+  // job whenever a rating/review/play-session is written, so hot-path
+  // reads (catalog listing, sorting by popularity) never need a join +
+  // aggregate at request time.
+  averageRating   Decimal       @default(0) @db.Decimal(3, 2)
+  ratingsCount    Int           @default(0)
+  activePlayers   Int           @default(0)
+  isFeatured      Boolean       @default(false)
+  isTrending      Boolean       @default(false)
+
+  deletedAt       DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  tags            GameTag[]         @relation("GameToGameTag")
+  media           GameMedia[]
+  reviews         GameReview[]
+  ratings         GameRating[]
+  favoritedBy     FavoriteGame[]
+  recentlyPlayedBy RecentlyPlayed[]
+  achievements    Achievement[]
+  leaderboards    Leaderboard[]
+  tournaments     Tournament[]
+  communityPosts  CommunityPost[]
+  sessions        GameSession[]
+  playerStats     UserGameStats[]
+
+  @@index([slug])
+  @@index([status])
+  @@index([categoryId])
+  @@index([isFeatured])
+  @@index([isTrending])
+  @@index([createdAt])
+  @@map("games")
+}
+
+model GameMedia {
+  id        String        @id @default(uuid())
+  gameId    String
+  game      Game          @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  type      GameMediaType
+  url       String
+  order     Int           @default(0)
+  createdAt DateTime      @default(now())
+
+  @@index([gameId, type])
+  @@map("game_media")
+}
+
+model GameReview {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameId    String
+  game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  title     String?
+  body      String
+  rating    Int      // 1-5, duplicated from GameRating at write time for display convenience
+  isEdited  Boolean  @default(false)
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, gameId])
+  @@index([gameId, createdAt])
+  @@map("game_reviews")
+}
+
+model GameRating {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameId    String
+  game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  score     Int      // 1-5
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, gameId])
+  @@index([gameId])
+  @@map("game_ratings")
+}
+
+model FavoriteGame {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameId    String
+  game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, gameId])
+  @@index([gameId])
+  @@map("favorite_games")
+}
+
+model RecentlyPlayed {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameId       String
+  game         Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  playCount    Int      @default(1)
+  lastPlayedAt DateTime @default(now())
+
+  @@unique([userId, gameId])
+  @@index([userId, lastPlayedAt])
+  @@map("recently_played")
+}
+
+// ─────────────────────────────────────────────
+// Leaderboards
+// ─────────────────────────────────────────────
+
+model Leaderboard {
+  id        String             @id @default(uuid())
+  gameId    String? // null = platform-wide leaderboard, not tied to one game
+  game      Game?              @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  name      String
+  season    String? // e.g. "Season 4" — null for an all-time/rolling board
+  isActive  Boolean            @default(true)
+  resetsAt  DateTime?
+
+  createdAt DateTime           @default(now())
+
+  entries   LeaderboardEntry[]
+
+  @@index([gameId, isActive])
+  @@map("leaderboards")
+}
+
+model LeaderboardEntry {
+  id            String      @id @default(uuid())
+  leaderboardId String
+  leaderboard   Leaderboard @relation(fields: [leaderboardId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  score         BigInt      @default(0)
+  // `rank` is a cached snapshot recomputed by a scheduled job (Phase 8/9),
+  // not derived live on every read — ranking millions of rows on every
+  // page view does not scale, recomputing on a cadence does.
+  rank          Int?
+
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([leaderboardId, userId])
+  @@index([leaderboardId, score(sort: Desc)])
+  @@map("leaderboard_entries")
+}
+
+// ─────────────────────────────────────────────
+// Achievements, XP, Badges
+// ─────────────────────────────────────────────
+
+model Achievement {
+  id          String            @id @default(uuid())
+  gameId      String? // null = platform-wide achievement
+  game        Game?             @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  slug        String            @unique
+  name        String
+  description String
+  type        AchievementType   @default(MILESTONE)
+  iconUrl     String?
+  xpReward    Int               @default(0)
+  isHidden    Boolean           @default(false)
+
+  createdAt   DateTime          @default(now())
+
+  unlockedBy  UserAchievement[]
+
+  @@index([gameId])
+  @@map("achievements")
+}
+
+model UserAchievement {
+  id            String      @id @default(uuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+
+  unlockedAt    DateTime    @default(now())
+
+  @@unique([userId, achievementId])
+  @@index([userId])
+  @@map("user_achievements")
+}
+
+/// Append-only ledger of every XP change. A user's total XP/level is a
+/// cached, denormalized field (to be added to Profile in Phase 8) that
+/// is derived by summing this table — keeping the ledger means XP is
+/// always auditable and recomputable, not just a mutable counter.
+model XPHistory {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  amount    Int // can be negative (e.g. penalty/correction)
+  reason    String // e.g. "match_win", "achievement:first-blood", "tournament_placement"
+  metadata  Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@map("xp_history")
+}
+
+model Badge {
+  id          String      @id @default(uuid())
+  slug        String      @unique
+  name        String
+  description String
+  iconUrl     String?
+  tier        String? // e.g. "bronze" | "silver" | "gold" | "platinum" — free-text on purpose, mirrors frontend Reward.tier
+
+  createdAt   DateTime    @default(now())
+
+  awardedTo   UserBadge[]
+
+  @@map("badges")
+}
+
+model UserBadge {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badgeId   String
+  badge     Badge    @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+
+  awardedAt DateTime @default(now())
+
+  @@unique([userId, badgeId])
+  @@index([userId])
+  @@map("user_badges")
+}
+
+// ─────────────────────────────────────────────
+// Tournaments
+// ─────────────────────────────────────────────
+
+model Tournament {
+  id                    String                       @id @default(uuid())
+  slug                  String                        @unique
+  gameId                String
+  game                  Game                          @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  title                 String
+  description           String?
+  /// Long-form rules shown on the detail page — admin-editable.
+  rules                 String?
+  bannerUrl             String?
+  status                TournamentStatus              @default(DRAFT)
+  format                TournamentFormat              @default(SINGLE_ELIMINATION)
+
+  maxParticipants       Int
+  // Prize pool stored in integer cents (never floating point) — no
+  // payment processing is implemented per this phase's brief, this is
+  // purely a display/record field a future payments phase will debit against.
+  prizePoolCents        Int                           @default(0)
+
+  registrationOpensAt   DateTime?
+  registrationClosesAt  DateTime?
+  startsAt              DateTime
+  endsAt                DateTime?
+
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @updatedAt
+
+  participants          TournamentParticipant[]
+  results               TournamentResult[]
+
+  @@index([gameId, status])
+  @@index([startsAt])
+  @@map("tournaments")
+}
+
+model TournamentParticipant {
+  id           String                       @id @default(uuid())
+  tournamentId String
+  tournament   Tournament                   @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  seed         Int?
+  status       TournamentParticipantStatus  @default(REGISTERED)
+  registeredAt DateTime                     @default(now())
+
+  @@unique([tournamentId, userId])
+  @@index([tournamentId, status])
+  @@map("tournament_participants")
+}
+
+model TournamentResult {
+  id               String     @id @default(uuid())
+  tournamentId     String
+  tournament       Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  placement        Int // 1 = champion
+  prizeAwardedCents Int       @default(0)
+
+  createdAt        DateTime  @default(now())
+
+  @@unique([tournamentId, userId])
+  @@index([tournamentId, placement])
+  @@map("tournament_results")
+}
+
+// ─────────────────────────────────────────────
+// Community
+// ─────────────────────────────────────────────
+
+model CommunityPost {
+  id         String              @id @default(uuid())
+  userId     String
+  user       User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameId     String?
+  game       Game?               @relation(fields: [gameId], references: [id], onDelete: SetNull)
+
+  content    String
+  mediaUrls  String[]            @default([])
+  deletedAt  DateTime?
+
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  comments   CommunityComment[]
+  likes      CommunityLike[]
+  bookmarks  CommunityBookmark[]
+  reports    CommunityReport[]
+
+  @@index([userId, createdAt])
+  @@index([gameId])
+  @@index([createdAt])
+  @@map("community_posts")
+}
+
+model CommunityComment {
+  id              String             @id @default(uuid())
+  postId          String
+  post            CommunityPost      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  parentCommentId String?
+  parentComment   CommunityComment?  @relation("CommentReplies", fields: [parentCommentId], references: [id], onDelete: Cascade)
+  replies         CommunityComment[] @relation("CommentReplies")
+
+  content         String
+  deletedAt       DateTime?
+
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  likes           CommunityLike[]
+  reports         CommunityReport[]
+
+  @@index([postId, createdAt])
+  @@index([parentCommentId])
+  @@map("community_comments")
+}
+
+/// See the Phase 5 design-notes block near the top of this section for
+/// why `postId`/`commentId` are both optional on one table rather than
+/// two tables, and the Postgres NULL-uniqueness caveat that implies.
+model CommunityLike {
+  id        String            @id @default(uuid())
+  userId    String
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId    String?
+  post      CommunityPost?    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  commentId String?
+  comment   CommunityComment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime          @default(now())
+
+  @@unique([userId, postId, commentId])
+  @@index([postId])
+  @@index([commentId])
+  @@map("community_likes")
+}
+
+model CommunityBookmark {
+  id        String        @id @default(uuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId    String
+  post      CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime      @default(now())
+
+  @@unique([userId, postId])
+  @@map("community_bookmarks")
+}
+
+model CommunityReport {
+  id             String            @id @default(uuid())
+  reporterId     String
+  reporter       User              @relation("ReportsFiled", fields: [reporterId], references: [id], onDelete: Cascade)
+
+  postId         String?
+  post           CommunityPost?    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  commentId      String?
+  comment        CommunityComment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  reason         ReportReason
+  notes          String?
+  status         ReportStatus      @default(PENDING)
+
+  resolvedById   String?
+  resolvedBy     User?             @relation("ReportsResolved", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt     DateTime?
+
+  createdAt      DateTime          @default(now())
+
+  @@index([status])
+  @@index([postId])
+  @@index([commentId])
+  @@map("community_reports")
+}
+
+// ─────────────────────────────────────────────
+// FAQ, Support, Site Settings, Audit Log
+// ─────────────────────────────────────────────
+
+model FAQ {
+  id          String   @id @default(uuid())
+  question    String
+  answer      String
+  category    String   @default("general")
+  order       Int      @default(0)
+  isPublished Boolean  @default(true)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([category, order])
+  @@map("faqs")
+}
+
+model SupportTicket {
+  id           String          @id @default(uuid())
+  userId       String
+  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  subject      String
+  description  String
+  status       SupportStatus   @default(OPEN)
+  priority     TicketPriority  @default(MEDIUM)
+
+  assignedToId String?
+  assignedTo   User?           @relation("AssignedSupportTickets", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  replies      SupportReply[]
+
+  @@index([userId])
+  @@index([status, priority])
+  @@map("support_tickets")
+}
+
+model SupportReply {
+  id         String        @id @default(uuid())
+  ticketId   String
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId   String
+  author     User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  message    String
+  isInternal Boolean       @default(false) // staff-only note, never shown to the ticket owner
+
+  createdAt  DateTime      @default(now())
+
+  @@index([ticketId, createdAt])
+  @@map("support_replies")
+}
+
+/// Generic key-value store for platform configuration that should be
+/// editable without a redeploy (e.g. feature flags, maintenance-mode
+/// banners). `value` is Json so a single table covers every settings
+/// shape without a schema migration per new setting.
+model SiteSetting {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       Json
+  description String?
+  updatedAt   DateTime @updatedAt
+
+  @@map("site_settings")
+}
+
+/// Append-only record of security/administrative actions (role changes,
+/// account suspensions, content moderation) for compliance and
+/// incident investigation. `actorId` is nullable to allow logging
+/// system-initiated actions (e.g. an automated lockout) with no human actor.
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  action     String // e.g. "user.suspended", "post.deleted", "role.changed"
+  entityType String // e.g. "User", "CommunityPost"
+  entityId   String
+  metadata   Json?
+  ipAddress  String?
+
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ═════════════════════════════════════════════════════════════
+// PHASE 6 BATCH 1 — Playable Game Engine
+// ═════════════════════════════════════════════════════════════
+//
+// Additive to Phase 5. Reuses existing models rather than duplicating:
+// `Game` (catalog entry, seeded for tic-tac-toe/snake/connect-four),
+// `Achievement`/`UserAchievement` (game-scoped via Achievement.gameId),
+// `XPHistory` (ledger — every XP award from a game session writes here),
+// `Leaderboard`/`LeaderboardEntry` (per-game all-time board, seeded),
+// `RecentlyPlayed` (updated on every session start).
+//
+// New tables only for what genuinely didn't exist yet: a per-play
+// session record, and a denormalized per-user-per-game stats row
+// (wins/losses/high score) so "your stats" reads don't have to
+// aggregate every session on every request.
+
+enum GameSessionStatus {
+  IN_PROGRESS
+  COMPLETED
+  ABANDONED
+}
+
+enum GameSessionResult {
+  WIN
+  LOSS
+  DRAW
+}
+
+model GameSession {
+  id              String              @id @default(uuid())
+  userId          String
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameId          String
+  game            Game                @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  status          GameSessionStatus   @default(IN_PROGRESS)
+  result          GameSessionResult?
+  score           Int                 @default(0)
+  durationSeconds Int                 @default(0)
+  // Free-form per-game payload: difficulty, opponent type (AI/human),
+  // move history, board snapshots — kept schemaless on purpose so each
+  // game's engine can evolve its own state shape without a migration.
+  metadata        Json?
+
+  startedAt       DateTime            @default(now())
+  endedAt         DateTime?
+
+  @@index([userId, gameId])
+  @@index([gameId, score(sort: Desc)])
+  @@index([userId, status])
+  @@map("game_sessions")
+}
+
+/// Denormalized per-user-per-game aggregate, recomputed incrementally
+/// by `gameSession.service.ts` every time a session ends — the same
+/// "cache the aggregate, don't compute it live" strategy documented in
+/// Phase 5's SCHEMA.md for `Game.averageRating`/`activePlayers`.
+model UserGameStats {
+  id                   String    @id @default(uuid())
+  userId               String
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameId               String
+  game                 Game      @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  gamesPlayed          Int       @default(0)
+  wins                 Int       @default(0)
+  losses               Int       @default(0)
+  draws                Int       @default(0)
+  highScore            Int       @default(0)
+  totalScore           Int       @default(0)
+  totalPlaytimeSeconds Int       @default(0)
+  lastPlayedAt         DateTime?
+
+  updatedAt            DateTime  @updatedAt
+
+  @@unique([userId, gameId])
+  @@index([gameId, highScore(sort: Desc)])
+  @@map("user_game_stats")
+}
+
+// ═════════════════════════════════════════════════════════════
+// GLOBAL SUPPORT MESSENGER (Mega Phase)
+// ═════════════════════════════════════════════════════════════
+//
+// Replaces the earlier per-game chat concept entirely. The product is
+// now a single, universal support messenger: ONE conversation per user
+// (enforced by the unique index on Conversation.userId), opened from a
+// floating button on every page — not tied to any game.
+//
+// Design notes:
+// - `Conversation` is 1:1 with its owning user (userId @unique). Admin
+//   agents attach via `assignedAgentId`, not by owning a conversation.
+// - `Message.senderType` distinguishes USER / AGENT / SYSTEM / BOT so
+//   the same table serves user messages, human-agent replies, and
+//   system/automated content (welcome, announcements) with no schema
+//   change when live agents or automation come online.
+// - Reply / edit / delete / reactions are represented in the schema now
+//   (replyToId, editedAt, deletedAt, MessageReaction) so the UI can be
+//   built against a stable shape; wiring can follow incrementally.
+// - `MessageReadStatus` powers unread counts + seen ticks generically
+//   (works for both directions: user-unread and agent-unread).
+// - QuickLink / Announcement / SupportSetting are all admin-configurable
+//   content — nothing the messenger shows by default is hardcoded.
+
+enum ConversationState {
+  OPEN
+  PENDING
+  RESOLVED
+  ARCHIVED
+}
+
+enum TicketCategory {
+  GENERAL
+  ACCOUNT
+  BILLING
+  TECHNICAL
+  GAME_ACCESS
+  BUG_REPORT
+  FEEDBACK
+}
+
+enum MessageSenderType {
+  USER
+  AGENT
+  SYSTEM
+  BOT
+}
+
+enum QuickLinkCategory {
+  FEATURED_GAME
+  TRENDING_GAME
+  REWARD
+  TOURNAMENT
+  CASINO
+  POKER
+  ROULETTE
+  BLACKJACK
+  SLOTS
+  GENERAL
+}
+
+model Conversation {
+  id              String             @id @default(uuid())
+
+  // One conversation per user — this @unique is the core invariant of
+  // the "single global messenger" product decision.
+  userId          String             @unique
+  user            User               @relation("ConversationOwner", fields: [userId], references: [id], onDelete: Cascade)
+
+  state           ConversationState  @default(OPEN)
+
+  // Admin/agent workflow fields — all optional, all admin-controlled.
+  assignedAgentId String?
+  assignedAgent   User?              @relation("AssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  isPinned        Boolean            @default(false)
+  subject         String?            // optional admin-set label for the thread
+
+  // ── Ticket fields (every conversation IS a support ticket) ──
+  // Auto-incrementing human-friendly ticket number (e.g. #1042). Uses
+  // an autoincrement Int alongside the uuid PK so agents can reference
+  // tickets by a short number without exposing/ typing UUIDs.
+  ticketNumber    Int                @unique @default(autoincrement())
+  priority        TicketPriority     @default(MEDIUM)
+  category        TicketCategory     @default(GENERAL)
+  tags            String[]           @default([])
+  resolutionNotes String?
+  resolvedAt      DateTime?
+  closedAt        DateTime?
+
+  /// The game the user most recently opened support from. Context only —
+  /// the conversation stays global (one per user), never split per game.
+  lastGameSlug    String?
+  lastGameTitle   String?
+
+  lastMessageAt   DateTime           @default(now())
+  lastMessagePreview String?         // denormalized for fast inbox lists (admin console)
+
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  messages        Message[]
+
+  @@index([state, lastMessageAt(sort: Desc)])
+  @@index([assignedAgentId])
+  @@index([isPinned, lastMessageAt(sort: Desc)])
+  @@index([priority, lastMessageAt(sort: Desc)])
+  @@index([category])
+  @@map("conversations")
+}
+
+model Message {
+  id             String             @id @default(uuid())
+  conversationId String
+  conversation   Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  senderType     MessageSenderType
+  // Null for SYSTEM/BOT messages; set for USER and AGENT messages.
+  senderId       String?
+  sender         User?              @relation("MessageSender", fields: [senderId], references: [id], onDelete: SetNull)
+
+  content        String
+  attachmentUrls String[]           @default([])
+
+  /// Game context captured at send time — which game the user was viewing.
+  /// Stored per-message so the thread shows where each question came from,
+  /// without ever splitting the single global conversation.
+  gameSlug       String?
+  gameTitle      String?
+
+  // Reply threading — points at the message being replied to.
+  replyToId      String?
+  replyTo        Message?           @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies        Message[]          @relation("MessageReplies")
+
+  // Soft-edit / soft-delete so history + "edited"/"deleted" markers survive.
+  editedAt       DateTime?
+  deletedAt      DateTime?
+
+  // Delivery status: createdAt = "sent", deliveredAt = recipient's client
+  // acknowledged receipt (via socket), read = tracked in MessageReadStatus.
+  deliveredAt    DateTime?
+
+  createdAt      DateTime           @default(now())
+
+  reactions      MessageReaction[]
+  readStatuses   MessageReadStatus[]
+
+  @@index([conversationId, createdAt])
+  @@index([replyToId])
+  @@map("messages")
+}
+
+model MessageReaction {
+  id         String   @id @default(uuid())
+  messageId  String
+  message    Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId     String
+  emoji      String   // stored as the emoji character / shortcode
+
+  createdAt  DateTime @default(now())
+
+  // One reaction of a given emoji per user per message.
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+  @@map("message_reactions")
+}
+
+model MessageReadStatus {
+  id         String   @id @default(uuid())
+  messageId  String
+  message    Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  readAt     DateTime @default(now())
+
+  @@unique([messageId, userId])
+  @@index([userId])
+  @@map("message_read_status")
+}
+
+/// Admin-configurable quick-action links surfaced in the messenger's
+/// default welcome experience (featured games, casino, rewards, etc.).
+model QuickLink {
+  id          String            @id @default(uuid())
+  category    QuickLinkCategory
+  label       String
+  url         String            // internal route or external URL
+  iconName    String?           // lucide icon name, resolved on the client
+  description String?
+  order       Int               @default(0)
+  isActive    Boolean           @default(true)
+
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([category, order])
+  @@index([isActive, order])
+  @@map("quick_links")
+}
+
+/// Platform-wide announcements the admin can broadcast; shown in the
+/// messenger's default view and (later) pushable into conversations.
+model Announcement {
+  id          String    @id @default(uuid())
+  title       String
+  body        String
+  isActive    Boolean   @default(true)
+  publishedAt DateTime  @default(now())
+  expiresAt   DateTime?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([isActive, publishedAt(sort: Desc)])
+  @@map("announcements")
+}
+
+/// Single-row (by convention) settings blob controlling the messenger's
+/// welcome message, support hours, and online/offline status — all
+/// editable from the admin panel, nothing hardcoded in the UI.
+model SupportSetting {
+  id             String   @id @default(uuid())
+  key            String   @unique // e.g. "welcome_message", "support_hours", "is_online"
+  value          String            // free-form (text or JSON string), interpreted by the service layer
+  updatedById    String?
+  updatedAt      DateTime @updatedAt
+
+  @@map("support_settings")
+}
+
+// ═══════════════════════════════════════════════════════════
+// PHASE 8 — Content Management System (CMS)
+// All content below is editable from the admin panel with zero
+// code changes. Pages read from these tables at request time.
+// ═══════════════════════════════════════════════════════════
+
+/// Keyed content blocks powering editable page sections (homepage
+/// hero, footer columns, navigation, about copy, contact info, etc).
+/// `value` is Json so any shape fits one table without per-section
+/// migrations. Example keys: "homepage.hero", "footer.columns",
+/// "nav.primary", "page.about", "contact.info".
+model SiteContent {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       Json
+  isPublished Boolean  @default(true)
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+
+  @@map("site_content")
+}
+
+/// Promotional / hero banners shown on the homepage and category
+/// pages. Fully admin-managed (image, link, order, active window).
+model Banner {
+  id          String       @id @default(uuid())
+  title       String
+  subtitle    String?
+  imageUrl    String
+  linkUrl     String?
+  ctaLabel    String?
+  placement   BannerPlacement @default(HOMEPAGE_HERO)
+  order       Int          @default(0)
+  isActive    Boolean      @default(true)
+  startsAt    DateTime?
+  endsAt      DateTime?
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([placement, order])
+  @@index([isActive])
+  @@map("banners")
+}
+
+/// Legal / informational long-form pages (Terms, Privacy, About,
+/// Cookie Policy…) addressed by slug. Body is rich text/markdown.
+model LegalPage {
+  id          String   @id @default(uuid())
+  slug        String   @unique // "terms", "privacy", "about", "cookie-policy"
+  title       String
+  body        String            // markdown / rich text
+  isPublished Boolean  @default(true)
+  updatedById String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("legal_pages")
+}
+
+/// Per-route SEO metadata (title, description, OG/Twitter, canonical,
+/// robots, JSON-LD structured data). Addressed by the route path so
+/// pages can look up their own meta at render time.
+model SeoMeta {
+  id              String   @id @default(uuid())
+  path            String   @unique // "/", "/games", "/about"
+  title           String
+  description     String
+  keywords        String[] @default([])
+  ogTitle         String?
+  ogDescription   String?
+  ogImageUrl      String?
+  twitterCard     String?  @default("summary_large_image")
+  canonicalUrl    String?
+  robots          String?  @default("index,follow")
+  structuredData  Json?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("seo_meta")
+}
+
+/// Central media library — every uploaded asset is catalogued here
+/// with folder, dimensions, and usage context so the admin can
+/// browse, search, rename, and delete from one place.
+model MediaAsset {
+  id          String   @id @default(uuid())
+  filename    String
+  url         String
+  folder      String   @default("general")
+  mimeType    String?
+  sizeBytes   Int?
+  width       Int?
+  height      Int?
+  altText     String?
+  uploadedById String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([folder, createdAt])
+  @@map("media_assets")
+}
+
+enum BannerPlacement {
+  HOMEPAGE_HERO
+  HOMEPAGE_SECONDARY
+  CATEGORY_TOP
+  SITEWIDE_STRIP
+}
+
+// ═══════════════════════════════════════════════════════════
+// REWARDS ECONOMY
+// Coins are cosmetic profile currency with no cash value. Every
+// balance change goes through CoinTransaction so the ledger is
+// auditable and balances can be recomputed if ever needed.
+// ═══════════════════════════════════════════════════════════
+
+/// One wallet per user. `balance` is a cached running total; the
+/// authoritative history lives in CoinTransaction.
+model CoinWallet {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions CoinTransaction[]
+
+  @@map("coin_wallets")
+}
+
+/// Immutable ledger entry. Positive amount = credit, negative = debit.
+model CoinTransaction {
+  id          String              @id @default(uuid())
+  walletId    String
+  wallet      CoinWallet          @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  amount      Int
+  balanceAfter Int
+  reason      CoinTransactionReason
+  /// Free-form link to what caused it (spin id, redemption id, etc.)
+  referenceId String?
+  metadata    Json?
+  createdAt   DateTime            @default(now())
+
+  @@index([walletId, createdAt])
+  @@map("coin_transactions")
+}
+
+enum CoinTransactionReason {
+  DAILY_LOGIN
+  WHEEL_SPIN
+  STORE_REDEMPTION
+  ACHIEVEMENT
+  TOURNAMENT_PRIZE
+  ADMIN_ADJUSTMENT
+}
+
+/// Admin-configured wheel segments. Weights are relative; the server
+/// picks the winner, never the client.
+model WheelSegment {
+  id         String     @id @default(uuid())
+  label      String
+  rewardType RewardType @default(COINS)
+  /// Coin amount when rewardType is COINS; ignored otherwise.
+  coinAmount Int        @default(0)
+  /// Hex colour for the wheel slice.
+  color      String     @default("#7C3AED")
+  weight     Int        @default(10)
+  order      Int        @default(0)
+  isActive   Boolean    @default(true)
+
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  spins      WheelSpin[]
+
+  @@index([isActive, order])
+  @@map("wheel_segments")
+}
+
+enum RewardType {
+  COINS
+  BADGE
+  FRAME
+  NAMEPLATE
+  NOTHING
+}
+
+/// Every spin is recorded — this is also what enforces "one per day"
+/// (a unique index on user + spin date makes a second spin impossible
+/// even under concurrent requests).
+model WheelSpin {
+  id         String       @id @default(uuid())
+  userId     String
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  segmentId  String
+  segment    WheelSegment @relation(fields: [segmentId], references: [id])
+  /// UTC date (yyyy-mm-dd) the spin belongs to — the daily-reset key.
+  spinDate   String
+  coinsWon   Int          @default(0)
+  createdAt  DateTime     @default(now())
+
+  @@unique([userId, spinDate])
+  @@index([userId, createdAt])
+  @@map("wheel_spins")
+}
+
+/// Admin-configured daily login ladder (Day 1..N). Nothing hardcoded.
+model DailyRewardConfig {
+  id         String     @id @default(uuid())
+  dayNumber  Int        @unique
+  label      String
+  rewardType RewardType @default(COINS)
+  coinAmount Int        @default(0)
+  isActive   Boolean    @default(true)
+
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@map("daily_reward_configs")
+}
+
+/// One claim per user per day, enforced by a unique index.
+model DailyRewardClaim {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dayNumber Int
+  claimDate String   // UTC yyyy-mm-dd
+  coinsWon  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, claimDate])
+  @@index([userId, createdAt])
+  @@map("daily_reward_claims")
+}
+
+/// Admin-managed store catalogue.
+model StoreItem {
+  id          String     @id @default(uuid())
+  slug        String     @unique
+  name        String
+  description String
+  imageUrl    String?
+  category    String     @default("cosmetic")
+  rarity      ItemRarity @default(BRONZE)
+  price       Int
+  /// null = unlimited stock
+  stock       Int?
+  /// null = no per-user cap
+  perUserLimit Int?
+  isActive    Boolean    @default(true)
+  expiresAt   DateTime?
+  order       Int        @default(0)
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  redemptions StoreRedemption[]
+
+  @@index([isActive, order])
+  @@map("store_items")
+}
+
+enum ItemRarity {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+}
+
+/// Records a completed redemption. Written inside the same transaction
+/// that debits coins and decrements stock, so it can't drift.
+model StoreRedemption {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemId    String
+  item      StoreItem @relation(fields: [itemId], references: [id])
+  pricePaid Int
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([itemId])
+  @@map("store_redemptions")
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// GRANULAR PERMISSIONS
+// Roles give a baseline permission set; these rows let a Super
+// Admin grant or revoke individual capabilities per admin without
+// inventing a new role. `granted: false` is an explicit deny that
+// overrides the role baseline.
+// ═══════════════════════════════════════════════════════════
+
+model UserPermission {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Dotted capability key, e.g. "games.update", "chat.reply".
+  permission String
+  granted    Boolean  @default(true)
+  grantedById String?
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, permission])
+  @@index([userId])
+  @@map("user_permissions")
+}

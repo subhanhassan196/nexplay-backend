@@ -1,0 +1,46 @@
+# ── Secrets — never commit these ──
+.env
+.env.local
+.env.*.local
+.env.production
+*.pem
+*.key
+
+# ── Dependencies ──
+node_modules/
+.pnp
+.pnp.*
+
+# ── Build output ──
+dist/
+build/
+*.tsbuildinfo
+
+# ── Prisma ──
+# Generated client is rebuilt on every install/deploy.
+node_modules/.prisma/
+prisma/*.db
+prisma/*.db-journal
+
+# ── Logs ──
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Testing ──
+coverage/
+.nyc_output/
+
+# ── Editors / OS ──
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Uploads / temp ──
+uploads/
+tmp/
+temp/
